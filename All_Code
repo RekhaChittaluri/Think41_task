@@ -1,0 +1,293 @@
+1️⃣ ResourceLogManagerApplication.java
+
+package com.example.resourcelog;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class ResourceLogManagerApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(ResourceLogManagerApplication.class, args);
+    }
+}
+
+2️⃣ ResourceLog.java (Entity)
+
+package com.example.resourcelog.model;
+
+import jakarta.persistence.*;
+import java.time.LocalDateTime;
+
+@Entity
+@Table(name = "resource_logs")
+public class ResourceLog {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private String resourceName;
+    private String processId;
+    private LocalDateTime timestamp;
+    private boolean isActive;
+
+    // Getters and Setters
+
+    public Long getId() {
+        return id;
+    }
+
+    public String getResourceName() {
+        return resourceName;
+    }
+
+    public void setResourceName(String resourceName) {
+        this.resourceName = resourceName;
+    }
+
+    public String getProcessId() {
+        return processId;
+    }
+
+    public void setProcessId(String processId) {
+        this.processId = processId;
+    }
+
+    public LocalDateTime getTimestamp() {
+        return timestamp;
+    }
+
+    public void setTimestamp(LocalDateTime timestamp) {
+        this.timestamp = timestamp;
+    }
+
+    public boolean isActive() {
+        return isActive;
+    }
+
+    public void setActive(boolean active) {
+        isActive = active;
+    }
+}
+
+3️⃣ ResourceLogRepository.java
+
+package com.example.resourcelog.repository;
+
+import com.example.resourcelog.model.ResourceLog;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.List;
+import java.util.Optional;
+
+public interface ResourceLogRepository extends JpaRepository<ResourceLog, Long> {
+
+    List<ResourceLog> findByIsActiveTrue();
+
+    Optional<ResourceLog> findByResourceNameAndIsActiveTrue(String resourceName);
+
+    List<ResourceLog> findByProcessIdAndIsActiveTrue(String processId);
+}
+
+4️⃣ ResourceLogService.java
+
+package com.example.resourcelog.service;
+
+import com.example.resourcelog.model.ResourceLog;
+import com.example.resourcelog.repository.ResourceLogRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Optional;
+
+@Service
+public class ResourceLogService {
+
+    @Autowired
+    private ResourceLogRepository repository;
+
+    public List<ResourceLog> getAllActiveLogs() {
+        return repository.findByIsActiveTrue();
+    }
+
+    public void acquireLogWithTimeout(String resourceName, String processId, long timeoutInSeconds) {
+        Optional<ResourceLog> existingLog = repository.findByResourceNameAndIsActiveTrue(resourceName);
+
+        if (existingLog.isPresent()) {
+            ResourceLog log = existingLog.get();
+            Duration duration = Duration.between(log.getTimestamp(), LocalDateTime.now());
+
+            if (duration.getSeconds() > timeoutInSeconds) {
+                // Take over the lock
+                log.setProcessId(processId);
+                log.setTimestamp(LocalDateTime.now());
+                repository.save(log);
+            } else {
+                throw new RuntimeException("Resource is currently locked. Try again later.");
+            }
+        } else {
+            // Create new lock
+            ResourceLog newLog = new ResourceLog();
+            newLog.setResourceName(resourceName);
+            newLog.setProcessId(processId);
+            newLog.setTimestamp(LocalDateTime.now());
+            newLog.setActive(true);
+            repository.save(newLog);
+        }
+    }
+
+    public List<ResourceLog> getActiveLogsByProcess(String processId) {
+        return repository.findByProcessIdAndIsActiveTrue(processId);
+    }
+
+    public void releaseLog(String resourceName, String processId) {
+        Optional<ResourceLog> existingLog = repository.findByResourceNameAndIsActiveTrue(resourceName);
+
+        if (existingLog.isPresent() && existingLog.get().getProcessId().equals(processId)) {
+            ResourceLog log = existingLog.get();
+            log.setActive(false);
+            repository.save(log);
+        } else {
+            throw new RuntimeException("Active log not found or process ID does not match.");
+        }
+    }
+}
+
+5️⃣ ResourceLogController.java
+
+package com.example.resourcelog.controller;
+
+import com.example.resourcelog.model.ResourceLog;
+import com.example.resourcelog.service.ResourceLogService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/log")
+public class ResourceLogController {
+
+    @Autowired
+    private ResourceLogService service;
+
+    @GetMapping("/locked")
+    public List<ResourceLog> listAllActiveLogs() {
+        return service.getAllActiveLogs();
+    }
+
+    @PostMapping("/request-with-timeout")
+    public ResponseEntity<String> requestLogWithTimeout(@RequestBody LogRequest request) {
+        try {
+            service.acquireLogWithTimeout(request.getResourceName(), request.getProcessId(), request.getTimeoutInSeconds());
+            return ResponseEntity.ok("Lock acquired or taken over successfully.");
+        } catch (RuntimeException ex) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(ex.getMessage());
+        }
+    }
+
+    @GetMapping("/process/{processId}")
+    public List<ResourceLog> getResourcesByProcess(@PathVariable String processId) {
+        return service.getActiveLogsByProcess(processId);
+    }
+
+    @PostMapping("/release")
+    public ResponseEntity<String> releaseLog(@RequestBody ReleaseRequest request) {
+        try {
+            service.releaseLog(request.getResourceName(), request.getProcessId());
+            return ResponseEntity.ok("Log released successfully.");
+        } catch (RuntimeException ex) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ex.getMessage());
+        }
+    }
+}
+
+6️⃣ DTOs (Helper Classes for Requests)
+LogRequest.java
+
+package com.example.resourcelog.controller;
+
+public class LogRequest {
+    private String resourceName;
+    private String processId;
+    private long timeoutInSeconds;
+
+    // Getters and Setters
+
+    public String getResourceName() {
+        return resourceName;
+    }
+
+    public void setResourceName(String resourceName) {
+        this.resourceName = resourceName;
+    }
+
+    public String getProcessId() {
+        return processId;
+    }
+
+    public void setProcessId(String processId) {
+        this.processId = processId;
+    }
+
+    public long getTimeoutInSeconds() {
+        return timeoutInSeconds;
+    }
+
+    public void setTimeoutInSeconds(long timeoutInSeconds) {
+        this.timeoutInSeconds = timeoutInSeconds;
+    }
+}
+
+ReleaseRequest.java
+
+package com.example.resourcelog.controller;
+
+public class ReleaseRequest {
+    private String resourceName;
+    private String processId;
+
+    // Getters and Setters
+
+    public String getResourceName() {
+        return resourceName;
+    }
+
+    public void setResourceName(String resourceName) {
+        this.resourceName = resourceName;
+    }
+
+    public String getProcessId() {
+        return processId;
+    }
+
+    public void setProcessId(String processId) {
+        this.processId = processId;
+    }
+}
+
+7️⃣ application.properties
+properties
+
+spring.datasource.url=jdbc:h2:mem:resourcelogdb
+spring.datasource.driverClassName=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+spring.h2.console.enabled=true
+spring.jpa.hibernate.ddl-auto=update
+
+8️⃣ Sample API Endpoints Summary:
+| **Endpoint**                     | **Description**                       |
+| -------------------------------- | ------------------------------------- |
+| `GET /log/locked`                | List all active (locked) resources    |
+| `POST /log/request-with-timeout` | Acquire or takeover lock with timeout |
+| `GET /log/process/{processId}`   | List locked resources for a process   |
+| `POST /log/release`              | Release a lock                        |
